@@ -153,9 +153,15 @@ QML_RULES = [
      "borrows Omarchy's catalog keys, which can change in any update; ship your own"),
     ("warning", re.compile(r"""font\.family\s*:\s*["'][^"']*(CJK|Han|Hei|Song|Ming|Gothic)"""),
      "hardcoded CJK family overrides the user's `omarchy font cjk` glyph form"),
-    ("warning", re.compile(r"""event\.text\s*===?\s*["']"""),
-     "shortcut compares event.text; on Cyrillic/Greek layouts the character differs, so compare event.key"),
+    ("warning", re.compile(r"""event\.text\s*===?\s*["'][A-Za-z]["']"""),
+     "letter shortcut matches event.text; dead on Cyrillic, Greek, Hebrew and Arabic layouts. Fall back to the key position (reference/input-methods.md, Rule 3)"),
 ]
+# Letter shortcuts that are dead on non-Latin layouts unless the file falls back
+# to the physical key. event.key is the layout's letter too: Ctrl+K on Russian
+# reports a Cyrillic key (measured by ime-probe).
+LETTER_KEY = re.compile(r"event\.key\s*===?\s*Qt\.Key_[A-Z]\b")
+FORWARDED_TEXT = re.compile(r"\w+\(\s*event\.text\s*,")
+SCAN_FALLBACK = re.compile(r"nativeScanCode")
 LITERAL_TEXT = re.compile(r"""(?:^|[{;])\s*(text|placeholderText|title|label|tooltip)\s*:\s*["']([^"']*[A-Za-z]{2}[^"']*)["']""")
 PASSWORD = re.compile(r"echoMode\s*:\s*TextInput\.Password")
 IME_GUARD = re.compile(r"fcitx5-remote|InputMethodState")
@@ -164,21 +170,30 @@ IME_GUARD = re.compile(r"fcitx5-remote|InputMethodState")
 def audit_qml(plugin: Path, report: Report) -> None:
     files = sorted(p for p in plugin.rglob("*.qml") if "node_modules" not in p.parts)
     uses_translations = False
+    literals = 0
     for path in files:
         text = path.read_text(errors="replace")
         rel = str(path.relative_to(plugin))
         uses_translations |= "Translations" in text
+        falls_back = bool(SCAN_FALLBACK.search(text))
         for number, line in enumerate(text.splitlines(), 1):
             if line.lstrip().startswith("//"):
                 continue
             for level, rule, message in QML_RULES:
                 if rule.search(line):
                     report.add(level, f"{rel}:{number}", message)
+            if not falls_back and LETTER_KEY.search(line):
+                report.add("warning", f"{rel}:{number}", "letter shortcut matches event.key, which is the layout's letter: dead on Cyrillic, Greek, Hebrew and Arabic layouts. Fall back to nativeScanCode (Rule 3)")
+            if not falls_back and FORWARDED_TEXT.search(line):
+                report.add("warning", f"{rel}:{number}", "event.text is handed to another function; if that matches letters, it has the same layout problem. Follow it")
             literal = LITERAL_TEXT.search(line)
             if literal:
+                literals += 1
                 report.add("warning", f"{rel}:{number}", f"hardcoded string \"{literal.group(2)}\"; move it to i18n/en.json")
         if PASSWORD.search(text) and not IME_GUARD.search(text):
             report.add("warning", rel, "password field without an input-method guard; a shared active engine composes it in the clear (see reference/input-methods.md, Rule 2)")
+    if literals:
+        report.add("info", "*.qml", f"{literals} hardcoded string(s) found by pattern. This is a LOWER BOUND: text built in JavaScript (ternaries, returns, concatenation) is not counted")
     if files and not uses_translations:
         report.add("error", "*.qml", "no Commons.Translations anywhere; nothing follows the language")
 

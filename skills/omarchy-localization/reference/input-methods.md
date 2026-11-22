@@ -88,14 +88,41 @@ Measured with `scripts/ime-probe` (Qt 6 on X11; Omarchy's shell runs on Wayland,
 - `event.text` is worse: it is the layout's character, and under an input method it is the raw Latin the engine was about to compose.
 - Fall back to the physical key **only when the reported key is outside ASCII**, so Dvorak and AZERTY keep their own letters:
 
-```qml
-readonly property var latinByScan: ({ 38: Qt.Key_A, 41: Qt.Key_F, 45: Qt.Key_K, 54: Qt.Key_C /* … all 26: QWERTY rows 24–33, 38–46, 52–58 */ })
-function shortcutKey(event) {
-  if (event.key < 0x80) return event.key
-  var latin = latinByScan[event.nativeScanCode]
-  return latin !== undefined ? latin : event.key
+```js
+// Model.js (.pragma library): one tested helper for the whole plugin.
+// For a non-ASCII character typed on a letter key, return the US QWERTY letter
+// at that key's position, keeping its case. ASCII is returned unchanged, so
+// Latin layouts (Dvorak, AZERTY) keep their own letters. xkb keycodes: evdev + 8.
+var QWERTY_LETTER_ROWS = [[24, "qwertyuiop"], [38, "asdfghjkl"], [52, "zxcvbnm"]]
+function shortcutText(text, scanCode) {
+  var raw = String(text || "")
+  if (raw.length !== 1 || raw.charCodeAt(0) < 0x80) return raw
+  for (var i = 0; i < QWERTY_LETTER_ROWS.length; i++) {
+    var offset = Number(scanCode) - QWERTY_LETTER_ROWS[i][0]
+    var letters = QWERTY_LETTER_ROWS[i][1]
+    if (offset >= 0 && offset < letters.length) {
+      var latin = letters.charAt(offset)
+      return raw !== raw.toLowerCase() ? latin.toUpperCase() : latin
+    }
+  }
+  return raw
 }
+// In the key handler:
+//   var text = Model.shortcutText(event.text, event.nativeScanCode)
+//   if (ctrl && text.toLowerCase() === "k") …
 ```
+
+Put it in a pure JS file so tests can call it with plain values; QTest cannot
+synthesise non-ASCII key events on every Qt version. Reel's
+`tests/tst_layout_keys.qml` is a ready test to copy. The secrets plugin used a
+26-entry map from scan code to `Qt.Key_*` instead, which also works, but it
+compares keys rather than text and loses Shift.
+
+**Qt's own shortcuts fail too.** Measured with `scripts/probe/paste.qml` (X11):
+on Russian, Ctrl+V reports key 1052 (М), `event.matches(StandardKey.Paste)` is
+false, and a TextInput's built-in paste does nothing. So a field's Ctrl+C, Ctrl+V
+and Ctrl+A are dead for Cyrillic typists unless the plugin handles them. That is
+a usability gap, not a hole in a paste guard, because nothing pastes at all.
 
   The table assumes the user's Latin layout is QWERTY, as GTK and Qt menus do. Worked example: the secrets plugin (parker-brown-family/omarchy-secrets-plugin#4).
 - Leave Right Alt alone on layouts that use it as AltGr (upstream #17504, open).

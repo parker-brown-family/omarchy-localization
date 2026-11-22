@@ -36,25 +36,22 @@ copy before trusting a path in this skill, and say which version you read:
 `reference/source-map.md` lists the files. If a path has moved, the installed
 source wins and this skill is stale. Say that, and file an issue here.
 
-## Step 1: Pick the tier
+## Step 1: Classify the plugin on three independent questions
 
-Classify the plugin before you translate anything. The tier decides the work.
+Answer each one separately. They are not a ladder: Reel has almost no text entry
+and is entirely keyboard-driven, while the secrets card had both problems.
 
-- **Tier 0, display only.** It shows text and takes clicks. Catalogs, plurals,
-  numbers, dates and mirroring make up the whole job. Most bar widgets are here.
-- **Tier 1, text entry.** It has a search line, a prompt, a rename box, any place
-  a person types words. Tier 0, plus the input-method contract in
-  `reference/input-methods.md`. This is the tier that broke the reminder prompt
-  for every CJK user until upstream fixed it.
-- **Tier 2, keyboard-driven or sensitive.** It owns shortcuts, reads raw keys,
-  takes a password or secret, or runs while a lock or overlay holds focus. Tier 1,
-  plus layout-independent shortcuts and switching the input method off for
-  secrets.
+- **Does it show text?** Then catalogs, plurals, numbers, dates and mirroring
+  apply (Step 2). Every plugin with a UI does.
+- **Does a person type words into it?** A search line, a prompt, a rename box.
+  Then the input-method contract applies (Step 3).
+- **Does it own keys?** Letter shortcuts, vim-style movement, a password field,
+  or anything running while a lock or overlay holds focus. Then layouts and
+  secrets apply (Step 4).
 
-Write the tier and the reason at the top of your plan. A plugin that grows a text
-field moves up a tier, and its checks move with it.
+Write the three answers and the reason for each at the top of your plan.
 
-## Step 2: Catalogs (every tier)
+## Step 2: Catalogs (if it shows text)
 
 Follow `reference/plugin-catalogs.md`. In short:
 
@@ -74,7 +71,7 @@ To translate in bulk, use the general `localization` skill's batch, validate and
 insert loop if you have it. This skill supplies the Omarchy contract that loop
 writes into.
 
-## Step 3: Text entry (Tier 1 and up)
+## Step 3: Text entry (if a person types words into it)
 
 Read `reference/input-methods.md`. The rule that matters most:
 
@@ -87,11 +84,20 @@ handler as its `keyHandler`. Hide the placeholder while there is `preeditText`.
 Let the composition window draw where the caret is, and do not swallow the keys
 the engine uses (Space, Enter and digits while it is composing).
 
-## Step 4: Keys and secrets (Tier 2)
+## Step 4: Keys and secrets (if it owns keys)
 
-- Letter shortcuts must survive non-Latin layouts. `event.key` is the layout's
-  letter (Ctrl+K on Russian reports a Cyrillic key), so fall back to the physical
-  key when the reported key is outside ASCII (`reference/input-methods.md`, Rule 3).
+- Letter shortcuts must survive non-Latin layouts. Both `event.key` and
+  `event.text` name the layout's letter (Ctrl+K on Russian reports a Cyrillic
+  key), and so does Qt's own `StandardKey` matching: on X11, Ctrl+V on Russian
+  matched nothing and pasted nothing. Fall back to the physical key when the
+  typed character is outside ASCII, with the shared snippet in
+  `reference/input-methods.md`, Rule 3. Follow `event.text` into any function it
+  is handed to; most of Reel's shortcuts were matched there, not in the handler.
+- **Before making a key work on more layouts, check what it does.** If it
+  discards, deletes or sends something, confirm no text field can reach that
+  handler while someone is typing (Reel: `blocked: typingPrefix ||
+  takeMenuRenaming`), and say in the change that a destructive key now works on
+  layouts where it did nothing.
 - Let `Super+I` and `Super+Shift+I` (switch input language) and `Ctrl+Space`
   in terminals pass through untouched.
 - A password or secret field must not compose. Set
@@ -102,20 +108,40 @@ the engine uses (Space, Enter and digits while it is composing).
 ## Step 5: Verify, in this order
 
 1. `python3 scripts/omarchy-l10n-audit <plugin-dir>`. Exit 1 means errors to fix,
-   and warnings are judgment calls you resolve or explain.
+   and warnings are judgment calls you resolve or explain. Its hardcoded-string
+   count is a lower bound: it does not see text built in JavaScript, so read the
+   files before estimating the size of a translation.
 2. Switch language live: `omarchy-language zh-CN`, then `ar`, then back to `en`.
    The plugin must re-render without a shell restart, and Arabic must mirror.
-3. Tier 1 and up, isolated: `scripts/ime-probe` proves the platform behaviour,
+3. Text entry, isolated: `scripts/ime-probe` proves the platform behaviour,
    and a plugin-level scenario (the recipe is in `reference/input-methods.md`)
    proves the plugin. The new check must fail against the old code.
    By hand: enable an input method under Setup > Typing, press `Super+I`, and type `ceshi` into every field. You must
    see preedit inline, a candidate popup, and `测试` committed. A screenshot of
    the committed CJK text is the evidence. Exit code 0 is not.
-4. Tier 2: lock or focus the secret field with Pinyin active. It must show dots,
+4. Keys: press each letter shortcut on a Russian layout (`setxkbmap ru` on the
+   private display, then the layout's own keysym, e.g. `Cyrillic_ka`). For secrets: lock or focus the secret field with Pinyin active. It must show dots,
    and the engine must come back afterwards.
 
 Report what you ran and what you saw. A check you could not run is reported as
 **not run**, never as passed.
+
+## Someone else's plugin
+
+Your plugin: fix it, prove it, merge it. Someone else's: be more conservative,
+and make every choice reversible until the person you work for has read it.
+
+1. Find their rules. Reel kept its agent guide in `docs/contributing/`, not at
+   the root, because the plugin directory is copied verbatim into installs. Use
+   their commit style, test runner and definition of done, not ours.
+2. Clone their source fresh. Never work from the installed copy, which may carry
+   local patches.
+3. Search their issues and pull requests by exact symbol (`nativeScanCode`,
+   the function name) as well as topic words, just before you push.
+4. Keep the change to one problem. Translating a whole plugin is a conversation
+   with the maintainer first. Ask in the pull request; do not send it unasked.
+5. Push to a fork and open the pull request form filled in, unsubmitted, for
+   your principal to read. Say what was not tested.
 
 ## Going beyond Chinese
 

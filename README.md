@@ -21,13 +21,16 @@ text only to real text-input items. A prompt built from `Keys.onPressed`
 appending `event.text` works perfectly in English and types raw `ceshi` instead
 of `测试` for every Chinese user. Omarchy's own reminder prompt shipped exactly
 this bug until upstream moved it to `FilterInput` (omacom/omarchy#16761). So the
-skill sorts plugins into three tiers:
+skill asks three independent questions of every plugin:
 
-| Tier | The plugin… | Work |
-|---|---|---|
-| 0 | only shows text | catalogs, plurals, numbers, dates, RTL |
-| 1 | takes typed text | Tier 0, plus a TextInput that input methods can reach |
-| 2 | owns shortcuts or secrets | Tier 1, plus layout-proof shortcuts, and no composing in password fields |
+| Question | If yes |
+|---|---|
+| Does it show text? | catalogs, plurals, numbers, dates, right-to-left |
+| Does a person type words into it? | a TextInput that input methods can reach |
+| Does it own keys? | letter shortcuts that survive Cyrillic, Greek, Hebrew and Arabic layouts; no composing in password fields; a check before a destructive key starts working on more layouts |
+
+They are independent. A keyboard-driven plugin with no text entry still fails
+every Russian typist if its shortcuts match typed letters.
 
 ## Install
 
@@ -89,7 +92,7 @@ python3 -m unittest discover tests
 
 ```
 skills/omarchy-localization/
-  SKILL.md                     the workflow: tier, catalogs, text entry, keys, verify
+  SKILL.md                     the workflow: three questions, catalogs, text entry, keys, verify, other people's plugins
   reference/plugin-catalogs.md the Omarchy i18n contract for plugins
   reference/input-methods.md   what the OS does, and the rules a plugin owes it
   reference/chinese-edition.md the Chinese build as a worked case, generalised

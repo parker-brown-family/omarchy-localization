@@ -37,6 +37,10 @@ class Audit(unittest.TestCase):
             "Qt.formatDate",
             "formatNumber",
             "password field without an input-method guard",
+            "letter shortcut matches event.key",
+            "letter shortcut matches event.text",
+            "event.text is handed to another function",
+            "LOWER BOUND",
         ]:
             self.assertIn(expected, text)
 
