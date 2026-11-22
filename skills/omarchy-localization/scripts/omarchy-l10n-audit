@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""Audit an Omarchy plugin for full localization.
+
+Reads the installed Omarchy source ($OMARCHY_PATH, default /usr/share/omarchy)
+for the language registry and plural rules, so nothing here goes stale when
+Omarchy adds a language. Standard library only, plus `jq` for plural.jq.
+
+Exit 0: no errors. Exit 1: errors. Exit 2: could not run (bad arguments,
+missing Omarchy source). Warnings never change the exit status.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+TOKEN = re.compile(r"%(\d+)")
+SAMPLE_COUNTS = list(range(0, 200)) + [1000000]
+
+
+class Report:
+    def __init__(self) -> None:
+        self.items: list[tuple[str, str, str]] = []
+
+    def add(self, level: str, where: str, message: str) -> None:
+        self.items.append((level, where, message))
+
+    def errors(self) -> int:
+        return sum(1 for level, _, _ in self.items if level == "error")
+
+
+def omarchy_root(arg: str | None) -> Path:
+    return Path(arg or os.environ.get("OMARCHY_PATH") or "/usr/share/omarchy")
+
+
+def load_locales(root: Path) -> dict:
+    return json.loads((root / "default/i18n/locales.json").read_text())
+
+
+def plural_categories(root: Path, codes: list[str]) -> dict[str, set[str]] | None:
+    """Ask Omarchy's own plural.jq which categories whole counts reach.
+
+    Returns None when jq or plural.jq is unavailable: unknown, not empty.
+    """
+    jq = shutil.which("jq")
+    lib = root / "default/i18n"
+    if not jq or not (lib / "plural.jq").exists():
+        return None
+    program = (
+        'include "plural"; $codes | map({key: ., value: (. as $c | '
+        "$counts | map(plural_category($c; .)) | unique)}) | from_entries"
+    )
+    out = subprocess.run(
+        [jq, "-n", "-c", "-L", str(lib), "--argjson", "codes", json.dumps(codes),
+         "--argjson", "counts", json.dumps(SAMPLE_COUNTS), program],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        return None
+    return {k: set(v) for k, v in json.loads(out.stdout).items()}
+
+
+def tokens(value) -> set[str]:
+    if isinstance(value, dict):
+        found: set[str] = set()
+        for v in value.values():
+            found |= tokens(v)
+        return found
+    return set(TOKEN.findall(value)) if isinstance(value, str) else set()
+
+
+def audit_catalogs(plugin: Path, root: Path, report: Report) -> None:
+    i18n = plugin / "i18n"
+    if not i18n.is_dir():
+        report.add("error", "i18n/", "no i18n/ directory; strings cannot follow Setup > Language")
+        return
+    english_path = i18n / "en.json"
+    if not english_path.exists():
+        report.add("error", "i18n/en.json", "missing; English is every language's fallback")
+        return
+    locales = load_locales(root)
+    catalogs: dict[str, dict] = {}
+    for path in sorted(i18n.glob("*.json")):
+        code = path.stem
+        if code not in locales:
+            hint = " (Omarchy codes use a hyphen: zh-CN)" if "_" in code else ""
+            report.add("error", f"i18n/{path.name}", f"'{code}' is not an Omarchy language code{hint}")
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except json.JSONDecodeError as exc:
+            report.add("error", f"i18n/{path.name}", f"invalid JSON: {exc}")
+            continue
+        if not isinstance(data, dict):
+            report.add("error", f"i18n/{path.name}", "must be a flat JSON object")
+            continue
+        catalogs[code] = data
+    english = catalogs.get("en", {})
+    plurals = plural_categories(root, sorted(catalogs))
+    if plurals is None:
+        report.add("warning", "i18n/", "plural categories NOT CHECKED: jq or plural.jq unavailable")
+    for code, data in catalogs.items():
+        where = f"i18n/{code}.json"
+        for key, value in data.items():
+            if key not in english:
+                report.add("warning", where, f"'{key}' has no English source (orphan or renamed?)")
+                continue
+            if tokens(value) != tokens(english[key]):
+                report.add("error", where, f"'{key}' placeholders {sorted(tokens(value))} differ from English {sorted(tokens(english[key]))}")
+            if isinstance(english[key], dict) != isinstance(value, dict):
+                report.add("error", where, f"'{key}' plural shape differs from English")
+            elif isinstance(value, dict) and plurals is not None:
+                need = plurals.get(code, set())
+                missing = need - set(value)
+                if missing:
+                    report.add("error", where, f"'{key}' lacks plural categories {sorted(missing)} that {code} uses")
+        if code != "en":
+            coverage = len(set(data) & set(english))
+            if coverage < len(english):
+                report.add("info", where, f"{coverage}/{len(english)} keys; the rest fall back to English")
+    shipped = sorted(c for c in catalogs if c != "en")
+    report.add("info", "i18n/", f"languages shipped: {', '.join(shipped) or 'English only'} of {len(locales)} Omarchy offers")
+
+
+QML_RULES = [
+    ("error", re.compile(r"\+=?\s*event\.text|event\.text\s*\)|setFilter\([^)]*event\.text"),
+     "builds text from Keys.onPressed event.text: input methods (Pinyin, Mozc, Hangul) never reach it; use Ui/FilterInput or a TextInput"),
+    ("warning", re.compile(r"\bQt\.format(Date|DateTime|Time)\s*\("),
+     "Qt.formatDate/Time freezes the language at shell start; use Qt.locale(Commons.I18n.formatLocale)"),
+    ("warning", re.compile(r"\bQt\.locale\(\s*\)"),
+     "bare Qt.locale() freezes at shell start; pass Commons.I18n.formatLocale"),
+    ("warning", re.compile(r"\.toFixed\(|\.toLocaleString\("),
+     "number formatted without Commons.I18n.formatNumber; decimal separator and digits will be English"),
+    ("warning", re.compile(r"Commons\.I18n\.tn?\("),
+     "borrows Omarchy's catalog keys, which can change in any update; ship your own"),
+    ("warning", re.compile(r"""font\.family\s*:\s*["'][^"']*(CJK|Han|Hei|Song|Ming|Gothic)"""),
+     "hardcoded CJK family overrides the user's `omarchy font cjk` glyph form"),
+    ("warning", re.compile(r"""event\.text\s*===?\s*["']"""),
+     "shortcut compares event.text; on Cyrillic/Greek layouts the character differs, so compare event.key"),
+]
+LITERAL_TEXT = re.compile(r"""(?:^|[{;])\s*(text|placeholderText|title|label|tooltip)\s*:\s*["']([^"']*[A-Za-z]{2}[^"']*)["']""")
+PASSWORD = re.compile(r"echoMode\s*:\s*TextInput\.Password")
+IME_GUARD = re.compile(r"fcitx5-remote|InputMethodState")
+
+
+def audit_qml(plugin: Path, report: Report) -> None:
+    files = sorted(p for p in plugin.rglob("*.qml") if "node_modules" not in p.parts)
+    uses_translations = False
+    for path in files:
+        text = path.read_text(errors="replace")
+        rel = str(path.relative_to(plugin))
+        uses_translations |= "Translations" in text
+        for number, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("//"):
+                continue
+            for level, rule, message in QML_RULES:
+                if rule.search(line):
+                    report.add(level, f"{rel}:{number}", message)
+            literal = LITERAL_TEXT.search(line)
+            if literal:
+                report.add("warning", f"{rel}:{number}", f"hardcoded string \"{literal.group(2)}\"; move it to i18n/en.json")
+        if PASSWORD.search(text) and not IME_GUARD.search(text):
+            report.add("warning", rel, "password field without an input-method guard; a shared active engine composes it in the clear (see reference/input-methods.md, Rule 2)")
+    if files and not uses_translations:
+        report.add("error", "*.qml", "no Commons.Translations anywhere; nothing follows the language")
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("plugin", type=Path)
+    parser.add_argument("--omarchy", help="Omarchy source root (default $OMARCHY_PATH or /usr/share/omarchy)")
+    parser.add_argument("--json", action="store_true", help="machine-readable output")
+    args = parser.parse_args(argv)
+    root = omarchy_root(args.omarchy)
+    if not (root / "default/i18n/locales.json").exists():
+        print(f"Omarchy source not found at {root}; pass --omarchy", file=sys.stderr)
+        return 2
+    if not args.plugin.is_dir():
+        print(f"not a directory: {args.plugin}", file=sys.stderr)
+        return 2
+    report = Report()
+    audit_catalogs(args.plugin, root, report)
+    audit_qml(args.plugin, report)
+    if args.json:
+        print(json.dumps([{"level": l, "where": w, "message": m} for l, w, m in report.items], ensure_ascii=False, indent=2))
+    else:
+        for level, where, message in report.items:
+            print(f"{level:7} {where}: {message}")
+        print(f"\n{report.errors()} error(s)")
+    return 1 if report.errors() else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
