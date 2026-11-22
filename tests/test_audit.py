@@ -31,7 +31,7 @@ class Audit(unittest.TestCase):
         for expected in [
             "input methods",             # Keys.onPressed event.text
             "not an Omarchy language code",  # zh_CN.json
-            "lacks plural categories ['few', 'many']",  # ru needs one/few/many
+            "lacks plural categories ['few', 'many'] that ru uses for everyday counts",
             "no Commons.Translations",
             "hardcoded string \"Type a reminder\"",
             "Qt.formatDate",
@@ -39,6 +39,13 @@ class Audit(unittest.TestCase):
             "password field without an input-method guard",
         ]:
             self.assertIn(expected, text)
+
+    def test_base_language_and_sidecar_accepted(self):
+        code, items = run("regional")
+        self.assertEqual(code, 0, [i for i in items if i["level"] == "error"])
+        text = "\n".join(i["message"] for i in items)
+        self.assertIn("sidecar file", text)
+        self.assertIn("only for counts like 1000000", text)  # fr many: a warning, not an error
 
     def test_missing_source_is_unknown_not_pass(self):
         out = subprocess.run([sys.executable, str(AUDIT), "--omarchy", "/nonexistent", str(HERE / "fixtures/good")],

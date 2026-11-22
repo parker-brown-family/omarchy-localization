@@ -1,0 +1,83 @@
+#!/bin/bash
+# Measures, on a private X display, what a Qt text surface receives from a real
+# Fcitx5 input method, and what keys a non-Latin layout reports. Nothing reaches
+# the desktop it runs from: own Xvfb, own D-Bus session, own Fcitx5 config.
+#
+# Usage: ime-probe            (all checks)
+# Needs: Xvfb (xvfb-run), xdotool, setxkbmap, qml6, fcitx5, fcitx5-chinese-addons, fcitx5-qt
+# Exit: 0 every expectation held, 1 one failed, 2 could not run.
+set -uo pipefail
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+for tool in xvfb-run xdotool setxkbmap qml6 fcitx5 fcitx5-remote dbus-run-session; do
+  command -v "$tool" >/dev/null || { echo "ime-probe: needs $tool (NOT RUN)" >&2; exit 2; }
+done
+[[ ${1:-} == --inner ]] || {
+  T=$(mktemp -d); trap 'rm -rf -- "$T"' EXIT
+  exec env -i PATH="$PATH" HOME="$T" XDG_CONFIG_HOME="$T/config" XDG_DATA_HOME="$T/data" \
+    XDG_RUNTIME_DIR="$T" LANG=en_US.UTF-8 IME_PROBE_DIR="$here" \
+    xvfb-run -a -s "-screen 0 800x300x24" dbus-run-session -- "$0" --inner
+}
+T=$HOME
+mkdir -p "$XDG_CONFIG_HOME/fcitx5"
+cat >"$XDG_CONFIG_HOME/fcitx5/profile" <<'P'
+[Groups/0]
+Name=Default
+Default Layout=us
+DefaultIM=pinyin
+
+[Groups/0/Items/0]
+Name=keyboard-us
+Layout=
+
+[Groups/0/Items/1]
+Name=pinyin
+Layout=
+
+[GroupOrder]
+0=Default
+P
+fcitx5 -d --disable=cloudpinyin,notificationitem,clipboard,spell >"$T/fcitx.log" 2>&1
+sleep 0.5; exec 2>/dev/null
+for _ in $(seq 40); do fcitx5-remote >/dev/null 2>&1 && break; sleep 0.25; done
+fcitx5-remote >/dev/null 2>&1 || { echo "fcitx5 did not start (NOT RUN)"; cat "$T/fcitx.log"; exit 2; }
+# Pinyin loads lazily and takes about a second; typing before it is ready
+# measures nothing.
+for _ in $(seq 40); do grep -q "Loaded addon pinyin" "$T/fcitx.log" && break; sleep 0.25; done
+grep -q "Loaded addon pinyin" "$T/fcitx.log" || { echo "the pinyin engine never loaded (NOT RUN)"; exit 2; }
+
+pass=0; fail=0
+expect() { if [[ $2 == "$3" ]]; then pass=$((pass+1)); echo "  ok    $1: $2"; else fail=$((fail+1)); echo "  FAIL  $1: got '$2', expected '$3'"; fi; }
+run() { # mode, then the key actions as a function name
+  local mode=$1 act=$2
+  QT_FORCE_STDERR_LOGGING=1 QT_IM_MODULE=fcitx QT_QPA_PLATFORM=xcb qml6 "$IME_PROBE_DIR/probe/probe.qml" -- "$mode" >"$T/out.$mode.$act" 2>&1 &
+  local pid=$! win=
+  for _ in $(seq 40); do win=$(xdotool search --onlyvisible --pid $pid 2>/dev/null | head -1); [[ -n $win ]] && break; sleep 0.25; done
+  [[ -n $win ]] || { echo "probe window never appeared (NOT RUN)"; cat "$T/out.$mode.$act"; kill $pid; exit 2; }
+  xdotool windowfocus --sync "$win"; sleep 0.8
+  $act
+  sleep 0.8; kill $pid 2>/dev/null; wait $pid 2>/dev/null
+}
+last_text() { grep -o 'PROBE text=.*' "$T/out.$1.$2" | tail -1 | cut -d= -f2-; }
+pinyin() { fcitx5-remote -o; sleep 0.4; xdotool type --delay 80 ceshi; sleep 0.4; xdotool key space; }
+
+echo "Pinyin: type 'ceshi' then Space, with Fcitx5 active"
+run textinput pinyin
+expect "TextInput commits Chinese" "$(last_text textinput pinyin)" "测试"
+grep -q 'PROBE preedit=.\+' "$T/out.textinput.pinyin" && { pass=$((pass+1)); echo "  ok    TextInput showed preedit while composing"; } || { fail=$((fail+1)); echo "  FAIL  no preedit seen"; }
+run keys pinyin
+got=$(last_text keys pinyin)
+grep -q 'PROBE key=' "$T/out.keys.pinyin" || { echo "  NOT RUN the key-collecting surface received no keys at all"; exit 2; }
+[[ $got != *测试* ]] && { pass=$((pass+1)); echo "  ok    Keys.onPressed never receives the Chinese text (got '${got}')"; } || { fail=$((fail+1)); echo "  FAIL  Keys.onPressed received Chinese: $got"; }
+
+echo "Russian layout, no input method: the physical A key, plain and with Ctrl"
+russian() { fcitx5-remote -c; setxkbmap ru; sleep 0.3; xdotool key Cyrillic_ef; sleep 0.2; xdotool key ctrl+Cyrillic_ef; sleep 0.2; setxkbmap us; }
+run keys russian
+plain=$(grep -m1 'PROBE key=' "$T/out.keys.russian")
+ctrl=$(grep 'PROBE key=' "$T/out.keys.russian" | grep -v 'mods=0 ' | grep -v 'key=16777249' | head -1)
+echo "  plain: $plain"; echo "  ctrl:  $ctrl"
+expect "plain A on ru is not Qt.Key_A (65)" "$( [[ $plain == *'key=65 '* ]] && echo key_a || echo other)" "other"
+expect "physical A keeps scan code 38" "$(sed -n 's/.*scan=\([0-9]*\).*/\1/p' <<<"$plain")" "38"
+ctrl_key=$(sed -n 's/.*key=\([0-9]*\) .*/\1/p' <<<"$ctrl")
+echo "  measured: Ctrl+A on ru reports key=$ctrl_key ($( [[ $ctrl_key == 65 ]] && echo 'Qt maps it back to Latin A' || echo 'NOT Latin A'))"
+echo; echo "$pass passed, $fail failed"
+((fail == 0))

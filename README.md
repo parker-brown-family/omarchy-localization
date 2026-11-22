@@ -67,6 +67,20 @@ could not check something says so instead of passing it. It is aimed at
 third-party plugins: Omarchy's built-in plugins use Omarchy's own catalog on
 purpose and will be flagged for it.
 
+## The input-method probe
+
+```bash
+skills/omarchy-localization/scripts/ime-probe
+```
+
+Runs a private virtual display, a private D-Bus session and a real Fcitx5 with
+Pinyin. It types `ceshi` + Space into a real text field and into a
+key-collecting one, and presses keys on a Russian layout. Nothing reaches your
+desktop. Measured on 2026-11-22: the text field commits `测试`, the collector
+gets `ceshi `, and Ctrl+A on Russian reports a Cyrillic key, not A.
+
+## Tests
+
 ```bash
 python3 -m unittest discover tests
 ```
@@ -81,6 +95,7 @@ skills/omarchy-localization/
   reference/chinese-edition.md the Chinese build as a worked case, generalised
   reference/source-map.md      which Omarchy files to read, and why
   scripts/omarchy-l10n-audit
+  scripts/ime-probe            isolated Fcitx5 + Xvfb measurement
 tests/                         fixtures: one clean plugin, one that breaks every rule
 ```
 

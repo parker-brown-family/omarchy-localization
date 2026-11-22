@@ -82,13 +82,27 @@ Also set `echoMode: TextInput.Password`.
 
 ## Rule 3: shortcuts survive every layout
 
-- Bind by keycode/`event.key`, not by `event.text`. On Cyrillic or Greek layouts
-  `Ctrl+C` produces no Latin "c" (upstream: "Keep universal clipboard shortcuts
-  working across keyboard layouts", #18940).
-- Leave Right Alt alone on layouts that use it as AltGr (#17504).
-- Never bind `Super+I`, `Super+Shift+I`, or `Ctrl+Space` over a terminal. Those
-  belong to input switching.
+Measured with `scripts/ime-probe` (Qt 6 on X11; Omarchy's shell runs on Wayland, which also reports xkb keycodes, but that was not measured): on a Russian layout the physical A key reports `event.key` 1060 (Cyrillic ф), **with or without Ctrl**, and `event.nativeScanCode` 38. So:
+
+- `ctrl && event.key === Qt.Key_K` never fires for a Cyrillic, Greek or Hebrew typist. Neither does a plain-letter shortcut.
+- `event.text` is worse: it is the layout's character, and under an input method it is the raw Latin the engine was about to compose.
+- Fall back to the physical key **only when the reported key is outside ASCII**, so Dvorak and AZERTY keep their own letters:
+
+```qml
+readonly property var latinByScan: ({ 38: Qt.Key_A, 41: Qt.Key_F, 45: Qt.Key_K, 54: Qt.Key_C /* … all 26: QWERTY rows 24–33, 38–46, 52–58 */ })
+function shortcutKey(event) {
+  if (event.key < 0x80) return event.key
+  var latin = latinByScan[event.nativeScanCode]
+  return latin !== undefined ? latin : event.key
+}
+```
+
+  The table assumes the user's Latin layout is QWERTY, as GTK and Qt menus do. Worked example: the secrets plugin (parker-brown-family/omarchy-secrets-plugin#4).
+- Leave Right Alt alone on layouts that use it as AltGr (upstream #17504, open).
+- Never bind `Super+I`, `Super+Shift+I`, or `Ctrl+Space` over a terminal. Those belong to input switching.
 - `FilterInput` already accepts Alt and Super chords so they never become text.
+
+Compositor-level shortcuts across layouts are a separate, unsolved upstream problem: "Keep universal clipboard shortcuts working across keyboard layouts" (#18940) is a **draft with open regressions** as of 2026-11-22. A plugin cannot fix those; do not claim it does.
 
 ## Rule 4: draw CJK with the theme's fonts
 
@@ -98,7 +112,31 @@ Chinese or Japanese form. A hardcoded family that lacks CJK glyphs still falls
 back, so it is mostly safe, but a hardcoded *CJK* family overrides the user's
 chosen form. That one is a bug.
 
-## Verifying for real
+## Verifying for real, without touching anyone's desktop
+
+`scripts/ime-probe` runs a private Xvfb, a private D-Bus session and a real
+Fcitx5 with Pinyin, then types into a TextInput and into a `Keys.onPressed`
+collector side by side, and presses keys on a Russian layout. Measured
+2026-11-22 (fcitx5 5.1.23, Qt 6): the TextInput shows preedit and commits
+`测试`; the collector receives `ceshi `.
+
+To drive the plugin itself the same way, copy the pattern the secrets plugin's
+`tests/ui.sh` uses: run the plugin's QML under `quickshell` on Xvfb with a stub
+`OverlayWindow`, start `fcitx5 -d` inside `dbus-run-session` with a profile
+whose `DefaultIM=pinyin`, wait for "Loaded addon pinyin" in its log, export
+`QT_IM_MODULE=fcitx`, then `fcitx5-remote -o` and `xdotool type ceshi`. Log the
+plugin's filter property and assert on it. **Run the new check against the old
+code too: it must fail there**, or it proves nothing.
+
+Two traps that cost a run each:
+
+- Qt sends `console.log` to the systemd journal when stderr is not a terminal.
+  Set `QT_FORCE_STDERR_LOGGING=1` or the probe sees nothing and a "never
+  received" check passes vacuously.
+- `xdotool key a` on a Russian layout remaps a spare keycode to produce Latin
+  `a`, hiding the bug. Send the layout's own keysym (`Cyrillic_ef` for the A key).
+
+By hand, on a real desktop:
 
 ```bash
 omarchy-language zh-CN

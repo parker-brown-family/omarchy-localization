@@ -20,7 +20,8 @@ import sys
 from pathlib import Path
 
 TOKEN = re.compile(r"%(\d+)")
-SAMPLE_COUNTS = list(range(0, 200)) + [1000000]
+EVERYDAY_COUNTS = list(range(0, 200))
+SAMPLE_COUNTS = EVERYDAY_COUNTS + [1000000]
 
 
 class Report:
@@ -42,8 +43,8 @@ def load_locales(root: Path) -> dict:
     return json.loads((root / "default/i18n/locales.json").read_text())
 
 
-def plural_categories(root: Path, codes: list[str]) -> dict[str, set[str]] | None:
-    """Ask Omarchy's own plural.jq which categories whole counts reach.
+def plural_categories(root: Path, codes: list[str], counts: list[int] = SAMPLE_COUNTS) -> dict[str, set[str]] | None:
+    """Ask Omarchy's own plural.jq which categories these whole counts reach.
 
     Returns None when jq or plural.jq is unavailable: unknown, not empty.
     """
@@ -57,7 +58,7 @@ def plural_categories(root: Path, codes: list[str]) -> dict[str, set[str]] | Non
     )
     out = subprocess.run(
         [jq, "-n", "-c", "-L", str(lib), "--argjson", "codes", json.dumps(codes),
-         "--argjson", "counts", json.dumps(SAMPLE_COUNTS), program],
+         "--argjson", "counts", json.dumps(counts), program],
         capture_output=True, text=True,
     )
     if out.returncode != 0:
@@ -85,9 +86,15 @@ def audit_catalogs(plugin: Path, root: Path, report: Report) -> None:
         return
     locales = load_locales(root)
     catalogs: dict[str, dict] = {}
+    # A base language is a valid catalog when a registered regional code falls
+    # back to it: Translations.qml reads es.json for es-MX.
+    bases = {code.split("-")[0] for code in locales}
     for path in sorted(i18n.glob("*.json")):
         code = path.stem
-        if code not in locales:
+        if code.startswith("_"):
+            report.add("info", f"i18n/{path.name}", "sidecar file (leading underscore), not a language; not loaded by Omarchy")
+            continue
+        if code not in locales and code not in bases:
             hint = " (Omarchy codes use a hyphen: zh-CN)" if "_" in code else ""
             report.add("error", f"i18n/{path.name}", f"'{code}' is not an Omarchy language code{hint}")
             continue
@@ -102,6 +109,7 @@ def audit_catalogs(plugin: Path, root: Path, report: Report) -> None:
         catalogs[code] = data
     english = catalogs.get("en", {})
     plurals = plural_categories(root, sorted(catalogs))
+    everyday = plural_categories(root, sorted(catalogs), EVERYDAY_COUNTS)
     if plurals is None:
         report.add("warning", "i18n/", "plural categories NOT CHECKED: jq or plural.jq unavailable")
     for code, data in catalogs.items():
@@ -115,10 +123,15 @@ def audit_catalogs(plugin: Path, root: Path, report: Report) -> None:
             if isinstance(english[key], dict) != isinstance(value, dict):
                 report.add("error", where, f"'{key}' plural shape differs from English")
             elif isinstance(value, dict) and plurals is not None:
-                need = plurals.get(code, set())
-                missing = need - set(value)
-                if missing:
-                    report.add("error", where, f"'{key}' lacks plural categories {sorted(missing)} that {code} uses")
+                # Plural.pick falls back to "other" for a missing form, so a
+                # gap only reached at a million is wording, not a broken count.
+                have = set(value)
+                common = (everyday or {}).get(code, set()) - have
+                rare = plurals.get(code, set()) - have - common
+                if common:
+                    report.add("error", where, f"'{key}' lacks plural categories {sorted(common)} that {code} uses for everyday counts; they would read as 'other'")
+                if rare:
+                    report.add("warning", where, f"'{key}' lacks {sorted(rare)}, which {code} uses only for counts like 1000000; 'other' is shown there")
         if code != "en":
             coverage = len(set(data) & set(english))
             if coverage < len(english):

@@ -89,9 +89,9 @@ the engine uses (Space, Enter and digits while it is composing).
 
 ## Step 4: Keys and secrets (Tier 2)
 
-- Bind shortcuts by key, never by the character a layout produces. Upstream fixed
-  clipboard shortcuts for exactly this, and also left Right Alt free on layouts
-  that use it as AltGr.
+- Letter shortcuts must survive non-Latin layouts. `event.key` is the layout's
+  letter (Ctrl+K on Russian reports a Cyrillic key), so fall back to the physical
+  key when the reported key is outside ASCII (`reference/input-methods.md`, Rule 3).
 - Let `Super+I` and `Super+Shift+I` (switch input language) and `Ctrl+Space`
   in terminals pass through untouched.
 - A password or secret field must not compose. Set
@@ -105,7 +105,10 @@ the engine uses (Space, Enter and digits while it is composing).
    and warnings are judgment calls you resolve or explain.
 2. Switch language live: `omarchy-language zh-CN`, then `ar`, then back to `en`.
    The plugin must re-render without a shell restart, and Arabic must mirror.
-3. Tier 1 and up: enable an input method under Setup > Typing, press `Super+I`, and type `ceshi` into every field. You must
+3. Tier 1 and up, isolated: `scripts/ime-probe` proves the platform behaviour,
+   and a plugin-level scenario (the recipe is in `reference/input-methods.md`)
+   proves the plugin. The new check must fail against the old code.
+   By hand: enable an input method under Setup > Typing, press `Super+I`, and type `ceshi` into every field. You must
    see preedit inline, a candidate popup, and `测试` committed. A screenshot of
    the committed CJK text is the evidence. Exit code 0 is not.
 4. Tier 2: lock or focus the secret field with Pinyin active. It must show dots,
